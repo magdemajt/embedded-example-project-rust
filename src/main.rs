@@ -2,6 +2,7 @@
 #![no_main]
 
 
+use core::borrow::Borrow;
 use core::cell::RefCell;
 // pick a panicking behavior
 use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
@@ -15,7 +16,7 @@ use cortex_m::{asm, iprintln};
 use cortex_m::interrupt::Mutex;
 
 use cortex_m_rt::{entry, exception, ExceptionFrame};
-use stm32f4xx_hal::gpio::{Edge, ExtiPin, GpioExt, Input, AF2, PinState};
+use stm32f4xx_hal::gpio::{Edge, ExtiPin, GpioExt, Input, AF2, PinState, AF5, Alternate};
 use stm32f4xx_hal::{gpio, pac};
 use pac::interrupt;
 use stm32f4xx_hal::prelude::_fugit_RateExtU32;
@@ -25,7 +26,7 @@ use stm32f4xx_hal::syscfg::SysCfgExt;
 use stm32f4xx_hal::time::U32Ext;
 use stm32f4xx_hal::timer::TimerExt;
 use cortex_m_semihosting::{hio, hprintln};
-use l3gd20::L3gd20;
+use l3gd20::{L3gd20, Scale};
 use stm32f4xx_hal::i2c::{I2cExt, Mode};
 use stm32f4xx_hal::spi::{Phase, Polarity, Spi};
 
@@ -122,10 +123,15 @@ fn main() -> ! {
 
     let rcc = dp.RCC.constrain();
 
-    let mut led = gpioc.pd12.into_push_pull_output();
-    let mut other_led = gpioc.pd13.into_push_pull_output();
-    let mut other_other_led = gpioc.pd14.into_push_pull_output();
-    let mut other_other_other_led = gpioc.pd15.into_push_pull_output();
+    // l3 -> orange
+    // l5 -> red
+    // l4 -> green
+    // l6 -> blue
+
+    let mut green_led = gpioc.pd12.into_push_pull_output();
+    let mut orange_led = gpioc.pd13.into_push_pull_output();
+    let mut red_led = gpioc.pd14.into_push_pull_output();
+    let mut blue_led = gpioc.pd15.into_push_pull_output();
 
     let spi_pins = (
         gpioa.pa5.into_alternate(),  // SCK
@@ -148,8 +154,11 @@ fn main() -> ! {
     );
     let mut gyroscope = L3gd20::new(spi, cs_pin).unwrap();
 
-    let stim = &mut cp.ITM.stim[0];
+    gyroscope.set_scale(Scale::Dps250).unwrap();
+    gyroscope.set_odr(l3gd20::Odr::Hz760).unwrap();
 
+
+    let stim = &mut cp.ITM.stim[0];
 
 
     // setup gyroscope
@@ -181,10 +190,6 @@ fn main() -> ! {
         BUTTON.borrow(cs).replace(Some(button));
     });
 
-
-    let mut is_other = false;
-    let mut is_other_on = false;
-
     // hprintln!("Hello, world!");
 
     let mut cycle = 0;
@@ -206,32 +211,58 @@ fn main() -> ! {
             BoardMode::Gyro => {
 
                 let status = gyroscope.status().unwrap();
+                let gyro_scale = gyroscope.scale().unwrap();
 
-                if status.new_data {
+                if cycle % 20 == 0 && status.new_data {
                     let measurement = gyroscope.all().unwrap();
-                    other_led.set_high();
+                    let x = gyro_scale.degrees(measurement.gyro.x);
+                    let y = gyro_scale.degrees(measurement.gyro.y);
+                    let z = gyro_scale.degrees(measurement.gyro.z);
+                    let activator_degree = 10 as f32;
+
+                    if status.x_new {
+                        if x > activator_degree {
+                            red_led.set_low();
+                            green_led.set_high();
+                        } else if x < -activator_degree {
+                            green_led.set_low();
+                            red_led.set_high();
+                        }
+                    }
+
+                    if status.z_new {
+                        if z < -activator_degree {
+                            blue_led.set_low();
+                            orange_led.set_high();
+                        } else if z > activator_degree {
+                            orange_led.set_low();
+                            blue_led.set_high();
+                        }
+                    }
+
                 }
 
             },
             BoardMode::LightingLeds => {
-                led.set_high();
-                other_led.set_high();
-                other_other_led.set_high();
-                other_other_other_led.set_high();
+                green_led.set_high();
+                orange_led.set_high();
+                red_led.set_high();
+                blue_led.set_high();
                 board.mode.next_state();
             },
             BoardMode::SwitchingOffLeds => {
-                led.set_low();
-                other_led.set_low();
-                other_other_led.set_low();
-                other_other_other_led.set_low();
+                green_led.set_low();
+                orange_led.set_low();
+                red_led.set_low();
+                blue_led.set_low();
                 board.mode.next_state();
             }
         };
 
 
         cycle += 1;
-        cycle %= 16_000;
+        cycle %= 160;
+        asm::delay(10);
     }
 }
 
