@@ -17,21 +17,29 @@ use cortex_m::interrupt::Mutex;
 
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use stm32f4xx_hal::gpio::{Edge, ExtiPin, GpioExt, Input, AF2, PinState, AF5, Alternate};
-use stm32f4xx_hal::{gpio, pac};
+use stm32f4xx_hal::{block, gpio, pac};
 use pac::interrupt;
 use stm32f4xx_hal::prelude::_fugit_RateExtU32;
 use stm32f4xx_hal::rcc::RccExt;
-use stm32f4xx_hal::serial::{Config, Serial, TxISR};
+use stm32f4xx_hal::serial::{Config, Serial, SerialExt, TxISR};
 use stm32f4xx_hal::syscfg::SysCfgExt;
 use stm32f4xx_hal::time::U32Ext;
 use stm32f4xx_hal::timer::TimerExt;
 use cortex_m_semihosting::{hio, hprintln};
 use l3gd20::{L3gd20, Scale};
 use stm32f4xx_hal::i2c::{I2cExt, Mode};
+use stm32f4xx_hal::interrupt::USART2;
 use stm32f4xx_hal::spi::{Phase, Polarity, Spi};
 
 
 // stm32f411e-disco
+
+fn abs(x: f32) -> f32 {
+    if x < 0.0 {
+        return -x;
+    }
+    return x;
+}
 
 enum BoardMode {
     LightingLeds,
@@ -152,10 +160,24 @@ fn main() -> ! {
         1.MHz(),
         &clocks,
     );
+
     let mut gyroscope = L3gd20::new(spi, cs_pin).unwrap();
 
-    gyroscope.set_scale(Scale::Dps250).unwrap();
-    gyroscope.set_odr(l3gd20::Odr::Hz760).unwrap();
+    // gyroscope.set_scale(Scale::Dps2000).unwrap();
+    // gyroscope.set_odr(l3gd20::Odr::Hz380).unwrap();
+
+    let tx_pin = gpioa.pa2.into_alternate();
+    let rx_pin = gpioa.pa3.into_alternate();
+
+    let serial = Serial::new(
+        dp.USART2,
+        (tx_pin, rx_pin),
+        Config::default().wordlength_8().parity_none().baudrate(115_200.bps()),
+        &clocks,
+    )
+        .unwrap();
+
+    let (mut tx, mut rx) = serial.split();
 
 
     let stim = &mut cp.ITM.stim[0];
@@ -192,7 +214,11 @@ fn main() -> ! {
 
     // hprintln!("Hello, world!");
 
+    writeln!(tx, "Setup successful").unwrap();
+
     let mut cycle = 0;
+
+    let (mut old_x, mut old_y, mut old_z) = (0f32, 0f32, 0f32);
 
     loop {
 
@@ -210,35 +236,53 @@ fn main() -> ! {
             },
             BoardMode::Gyro => {
 
-                let status = gyroscope.status().unwrap();
-                let gyro_scale = gyroscope.scale().unwrap();
-
-                if cycle % 20 == 0 && status.new_data {
+                if cycle % 5 == 0 {
+                    let status = gyroscope.status();
+                    if let Err(_) = status {
+                        writeln!(tx, "Error reading status").unwrap();
+                        continue;
+                    }
+                    let status = status.unwrap();
+                    // print new
+                    if !status.x_new && !status.y_new && !status.z_new {
+                        continue;
+                    }
                     let measurement = gyroscope.all().unwrap();
-                    let x = gyro_scale.degrees(measurement.gyro.x);
-                    let y = gyro_scale.degrees(measurement.gyro.y);
-                    let z = gyro_scale.degrees(measurement.gyro.z);
-                    let activator_degree = 10 as f32;
+                    let gyro_scale = gyroscope.scale().unwrap();
+                    let x = gyro_scale.radians(measurement.gyro.x);
+                    let y = gyro_scale.radians(measurement.gyro.y);
+                    let z = gyro_scale.radians(measurement.gyro.z);
+                    let diff = abs(x - old_x) + abs(y - old_y) +  abs(z - old_z);
+                    if diff < 0.015f32 {
+                        continue;
+                    }
 
-                    if status.x_new {
-                        if x > activator_degree {
+                    // writeln!(tx, "x: {}, y: {}, z: {}", &x, &y, &z).unwrap();
+                    // writeln!(tx, "diff: x: {}, y: {}, z: {}", x - old_x, y - old_y, z - old_z).unwrap();
+
+                    if abs(x - old_x) > 0.01f32 {
+                        if x - old_x > 0f32 {
                             red_led.set_low();
                             green_led.set_high();
-                        } else if x < -activator_degree {
+                        } else if x - old_x < 0f32 {
                             green_led.set_low();
                             red_led.set_high();
                         }
                     }
 
-                    if status.z_new {
-                        if z < -activator_degree {
+                    if abs(y - old_y) > 0.01f32 {
+                        if y - old_y > 0f32 {
                             blue_led.set_low();
                             orange_led.set_high();
-                        } else if z > activator_degree {
+                        } else if y - old_y < 0f32 {
                             orange_led.set_low();
                             blue_led.set_high();
                         }
                     }
+
+                    old_x = x;
+                    old_y = y;
+                    old_z = z;
 
                 }
 
@@ -248,20 +292,21 @@ fn main() -> ! {
                 orange_led.set_high();
                 red_led.set_high();
                 blue_led.set_high();
-                board.mode.next_state();
+                board.next_state();
             },
             BoardMode::SwitchingOffLeds => {
                 green_led.set_low();
                 orange_led.set_low();
                 red_led.set_low();
                 blue_led.set_low();
-                board.mode.next_state();
+                board.next_state();
+                asm::delay(1_000_000);
             }
         };
 
 
         cycle += 1;
-        cycle %= 160;
+        cycle %= 1600;
         asm::delay(10);
     }
 }
