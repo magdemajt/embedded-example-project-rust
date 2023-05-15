@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
+pub mod cs43l22;
+
 
 use core::borrow::Borrow;
 use core::cell::RefCell;
+use core::cmp::max;
 // pick a panicking behavior
 use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
 // use panic_abort as _; // requires nightly
@@ -17,7 +20,7 @@ use cortex_m::interrupt::Mutex;
 
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use stm32f4xx_hal::gpio::{Edge, ExtiPin, GpioExt, Input, AF2, PinState, AF5, Alternate};
-use stm32f4xx_hal::{block, gpio, pac};
+use stm32f4xx_hal::{block, gpio, i2s, pac};
 use pac::interrupt;
 use stm32f4xx_hal::prelude::_fugit_RateExtU32;
 use stm32f4xx_hal::rcc::RccExt;
@@ -28,11 +31,70 @@ use stm32f4xx_hal::timer::TimerExt;
 use cortex_m_semihosting::{hio, hprintln};
 use l3gd20::{L3gd20, Scale};
 use stm32f4xx_hal::i2c::{I2cExt, Mode};
+use stm32f4xx_hal::i2s::stm32_i2s_v12x::transfer::{Data32Channel32, I2sTransfer, I2sTransferConfig, Philips};
 use stm32f4xx_hal::interrupt::USART2;
 use stm32f4xx_hal::spi::{Phase, Polarity, Spi};
+use crate::cs43l22::CS43L22;
 
+const SAMPLE_RATE: u32 = 96_000;
 
 // stm32f411e-disco
+
+struct Angle {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+const ANGLE_THRESHOLD: f32 = 5.0;
+
+impl Angle {
+    pub fn new() -> Self {
+        Angle {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        }
+    }
+    pub fn update(&mut self, x: f32, y: f32, z: f32) {
+        if abs(x) > ANGLE_THRESHOLD {
+            if self.x + x > 360.0 {
+                self.x = self.x + x - 360.0;
+            } else {
+                self.x += x;
+            }
+        }
+        if abs(y) > ANGLE_THRESHOLD {
+            if self.y + y > 360.0 {
+                self.y = self.y + y - 360.0;
+            } else {
+                self.y += y;
+            }
+        }
+        if abs(z) > ANGLE_THRESHOLD {
+            if self.z + z > 360.0 {
+                self.z = self.z + z - 360.0;
+            } else {
+                self.z += z;
+            }
+        }
+    }
+
+    pub fn x(&self) -> f32 {
+        return self.x;
+    }
+    pub fn y(&self) -> f32 {
+        return self.y;
+    }
+    pub fn z(&self) -> f32 {
+        return self.z;
+    }
+    pub fn reset(&mut self) {
+        self.x = 0.0;
+        self.y = 0.0;
+        self.z = 0.0;
+    }
+}
 
 fn abs(x: f32) -> f32 {
     if x < 0.0 {
@@ -41,11 +103,12 @@ fn abs(x: f32) -> f32 {
     return x;
 }
 
+
 enum BoardMode {
     LightingLeds,
     SwitchingOffLeds,
     AllLeds,
-    Gyro
+    Gyro,
 }
 
 impl BoardMode {
@@ -55,18 +118,20 @@ impl BoardMode {
             BoardMode::SwitchingOffLeds => BoardMode::Gyro,
             BoardMode::AllLeds => BoardMode::AllLeds,
             BoardMode::Gyro => BoardMode::Gyro,
-        }
+        };
     }
 }
 
 struct Board {
     pub mode: BoardMode,
+    pub angle: Angle,
 }
 
 impl Board {
     pub fn new() -> Self {
         Board {
             mode: BoardMode::Gyro,
+            angle: Angle::new(),
         }
     }
 
@@ -89,6 +154,12 @@ impl Board {
 
     pub fn next_state(&mut self) {
         let next_state = self.mode.next_state();
+        match next_state {
+            BoardMode::SwitchingOffLeds => {
+                self.angle.reset();
+            }
+            _ => {}
+        };
         self.mode = next_state;
     }
 }
@@ -123,9 +194,11 @@ fn main() -> ! {
 
     let gpioa = dp.GPIOA.split();
 
-    let gpioc = dp.GPIOD.split();
+    let gpiod = dp.GPIOD.split();
 
     let gpiob = dp.GPIOB.split();
+
+    let gpioc = dp.GPIOC.split();
 
     let gpioe = dp.GPIOE.split();
 
@@ -136,10 +209,10 @@ fn main() -> ! {
     // l4 -> green
     // l6 -> blue
 
-    let mut green_led = gpioc.pd12.into_push_pull_output();
-    let mut orange_led = gpioc.pd13.into_push_pull_output();
-    let mut red_led = gpioc.pd14.into_push_pull_output();
-    let mut blue_led = gpioc.pd15.into_push_pull_output();
+    let mut green_led = gpiod.pd12.into_push_pull_output();
+    let mut orange_led = gpiod.pd13.into_push_pull_output();
+    let mut red_led = gpiod.pd14.into_push_pull_output();
+    let mut blue_led = gpiod.pd15.into_push_pull_output();
 
     let spi_pins = (
         gpioa.pa5.into_alternate(),  // SCK
@@ -147,9 +220,45 @@ fn main() -> ! {
         gpioa.pa7.into_alternate(),  // MOSI
     );
 
+    let cs43l22_sda = gpiob.pb9;
+    let cs43l22_scl = gpiob.pb6;
+
+    let cs43l22_ws = gpioa.pa4;
+    let cs43l22_mck = gpioc.pc7;
+    let cs43l22_ck = gpioc.pc10;
+    let cs43l22_sd = gpioc.pc12;
+    let cs43l22_reset = gpiod.pd4.into_push_pull_output();
+
     let mut cs_pin = gpioe.pe3.into_push_pull_output();
 
     let clocks = rcc.cfgr.use_hse(8.MHz()).freeze();
+
+    let i2c1 = dp.I2C1.i2c(
+        (cs43l22_scl, cs43l22_sda),
+        100.kHz(),
+        &clocks,
+    );
+
+    let mut codec = CS43L22::new(i2c1, 0x4A, cs43l22::Config::new().volume(100).verify_write(true)).unwrap();
+
+    codec.play().unwrap();
+
+    let i2s = i2s::I2s::new(dp.SPI3, (
+        cs43l22_ws,
+        cs43l22_ck,
+        cs43l22_mck,
+        cs43l22_sd,
+    ), &clocks);
+    let i2s_config = I2sTransferConfig::new_master()
+        .transmit()
+        .master_clock(true)
+        .standard(Philips)
+        .data_format(Data32Channel32)
+        .request_frequency(SAMPLE_RATE);
+
+
+    let mut i2s_transfer = I2sTransfer::new(i2s, i2s_config);
+
 
     cs_pin.set_high();
 
@@ -157,14 +266,14 @@ fn main() -> ! {
         dp.SPI1,
         spi_pins,
         l3gd20::MODE,
-        1.MHz(),
+        4.MHz(),
         &clocks,
     );
 
     let mut gyroscope = L3gd20::new(spi, cs_pin).unwrap();
 
-    // gyroscope.set_scale(Scale::Dps2000).unwrap();
-    // gyroscope.set_odr(l3gd20::Odr::Hz380).unwrap();
+    gyroscope.set_scale(Scale::Dps500).unwrap();
+    gyroscope.set_odr(l3gd20::Odr::Hz760).unwrap();
 
     let tx_pin = gpioa.pa2.into_alternate();
     let rx_pin = gpioa.pa3.into_alternate();
@@ -186,14 +295,11 @@ fn main() -> ! {
     // setup gyroscope
 
 
-
     let delay = dp.TIM1.delay_ms(&clocks);
 
     // setting up interrupts
 
     let mut syscfg = dp.SYSCFG.constrain();
-
-
 
 
     let mut button = gpioa.pa0.into_pull_down_input();
@@ -218,10 +324,7 @@ fn main() -> ! {
 
     let mut cycle = 0;
 
-    let (mut old_x, mut old_y, mut old_z) = (0f32, 0f32, 0f32);
-
     loop {
-
         cortex_m::interrupt::free(|cs| {
             let mut activator = LED_ACTIVATOR.borrow(cs).borrow_mut();
             if *activator {
@@ -231,75 +334,66 @@ fn main() -> ! {
         });
 
         match &board.mode {
-            BoardMode::AllLeds => {
-
-            },
+            BoardMode::AllLeds => {}
             BoardMode::Gyro => {
-
-                if cycle % 5 == 0 {
-                    let status = gyroscope.status();
-                    if let Err(_) = status {
-                        writeln!(tx, "Error reading status").unwrap();
-                        continue;
+                let mut angle = &mut board.angle;
+                if cycle % 10 == 0 {
+                    if angle.x() > 0.5f32 {
+                        green_led.set_high();
+                        red_led.set_low();
+                    } else if angle.x() < -0.5f32 {
+                        green_led.set_low();
+                        red_led.set_high();
                     }
-                    let status = status.unwrap();
-                    // print new
-                    if !status.x_new && !status.y_new && !status.z_new {
-                        continue;
+                    if angle.y() < -0.5f32 {
+                        orange_led.set_high();
+                        blue_led.set_low();
+                    } else if angle.y() > 0.5f32 {
+                        orange_led.set_low();
+                        blue_led.set_high();
                     }
-                    let measurement = gyroscope.all().unwrap();
-                    let gyro_scale = gyroscope.scale().unwrap();
-                    let x = gyro_scale.radians(measurement.gyro.x);
-                    let y = gyro_scale.radians(measurement.gyro.y);
-                    let z = gyro_scale.radians(measurement.gyro.z);
-                    let diff = abs(x - old_x) + abs(y - old_y) +  abs(z - old_z);
-                    if diff < 0.015f32 {
-                        continue;
-                    }
-
-                    // writeln!(tx, "x: {}, y: {}, z: {}", &x, &y, &z).unwrap();
-                    // writeln!(tx, "diff: x: {}, y: {}, z: {}", x - old_x, y - old_y, z - old_z).unwrap();
-
-                    if abs(x - old_x) > 0.01f32 {
-                        if x - old_x > 0f32 {
-                            red_led.set_low();
-                            green_led.set_high();
-                        } else if x - old_x < 0f32 {
-                            green_led.set_low();
-                            red_led.set_high();
-                        }
-                    }
-
-                    if abs(y - old_y) > 0.01f32 {
-                        if y - old_y > 0f32 {
-                            blue_led.set_low();
-                            orange_led.set_high();
-                        } else if y - old_y < 0f32 {
-                            orange_led.set_low();
-                            blue_led.set_high();
-                        }
-                    }
-
-                    old_x = x;
-                    old_y = y;
-                    old_z = z;
-
                 }
 
-            },
+                if cycle % 50 == 0 {
+                    writeln!(tx, "x: {}, y: {}, z: {}", angle.x(), angle.y(), angle.z()).unwrap();
+                }
+
+                let status = gyroscope.status();
+                if let Err(_) = status {
+                    writeln!(tx, "Error reading status").unwrap();
+                    continue;
+                }
+                let status = status.unwrap();
+                // print new
+                if !status.x_new && !status.y_new && !status.z_new {
+                    continue;
+                }
+
+                let status_x_float = if status.x_new { 1.0 } else { 0.0 };
+                let status_y_float = if status.y_new { 1.0 } else { 0.0 };
+                let status_z_float = if status.z_new { 1.0 } else { 0.0 };
+
+                let measurement = gyroscope.all().unwrap();
+                let gyro_scale = gyroscope.scale().unwrap();
+                let x = gyro_scale.degrees(measurement.gyro.x) * status_x_float;
+                let y = gyro_scale.degrees(measurement.gyro.y) * status_y_float;
+                let z = gyro_scale.degrees(measurement.gyro.z) * status_z_float;
+                angle.update(x, y, z);
+            }
             BoardMode::LightingLeds => {
                 green_led.set_high();
                 orange_led.set_high();
                 red_led.set_high();
                 blue_led.set_high();
                 board.next_state();
-            },
+            }
             BoardMode::SwitchingOffLeds => {
                 green_led.set_low();
                 orange_led.set_low();
                 red_led.set_low();
                 blue_led.set_low();
                 board.next_state();
+                board.angle.reset();
                 asm::delay(1_000_000);
             }
         };

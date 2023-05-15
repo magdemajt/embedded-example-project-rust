@@ -17,7 +17,7 @@
 //! (gdb) backtrace
 //! #0  __bkpt () at asm/bkpt.s:3
 //! #1  0x080030b4 in cortex_m::asm::bkpt () at $$/cortex-m-0.5.0/src/asm.rs:19
-//! #2  rust_begin_unwind (args=..., file=..., line=99, col=5) at $$/panic-semihosting-0.2.0/src/lib.rs:87
+//! #2  rust_begin_unwind (args=..., file=..., line=99, col=5) at $$/panic-semihosting-0.2.0/src/cs43l22:87
 //! #3  0x08001d06 in core::panicking::panic_fmt () at libcore/panicking.rs:71
 //! #4  0x080004a6 in crash::hard_fault (ef=0x20004fa0) at examples/crash.rs:99
 //! #5  0x08000548 in UserHardFault (ef=0x20004fa0) at <exception macros>:10

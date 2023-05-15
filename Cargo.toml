@@ -8,10 +8,11 @@ version = "0.1.0"
 [dependencies]
 cortex-m = "0.7.7"
 cortex-m-rt = "0.7.3"
-cortex-m-semihosting = "0.3.3"
+cortex-m-semihosting = "0.5.0"
 panic-halt = "0.2.0"
-stm32f4xx-hal = { version = "0.15.0", features = ["stm32f411"] }
+stm32f4xx-hal = { version = "0.16.0", features = ["stm32f411", "i2s"] }
 l3gd20 = "0.3.0"
+embedded-hal = "0.2.7"
 
 # Uncomment for the panic example.
 # panic-itm = "0.4.1"
