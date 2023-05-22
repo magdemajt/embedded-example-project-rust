@@ -220,28 +220,35 @@ fn main() -> ! {
         gpioa.pa7.into_alternate(),  // MOSI
     );
 
-    let cs43l22_sda = gpiob.pb9;
-    let cs43l22_scl = gpiob.pb6;
+    let audio_sda = gpiob.pb9;
+    let audio_scl = gpiob.pb6;
 
     let cs43l22_ws = gpioa.pa4;
     let cs43l22_mck = gpioc.pc7;
     let cs43l22_ck = gpioc.pc10;
     let cs43l22_sd = gpioc.pc12;
-    let cs43l22_reset = gpiod.pd4.into_push_pull_output();
+    let mut cs43l22_reset = gpiod.pd4.into_push_pull_output();
+
+    cs43l22_reset.set_high();
 
     let mut cs_pin = gpioe.pe3.into_push_pull_output();
 
-    let clocks = rcc.cfgr.use_hse(8.MHz()).freeze();
+    let clocks = rcc.cfgr
+        .use_hse(8.MHz())
+        .i2s_clk(96.MHz())
+        .freeze();
 
     let i2c1 = dp.I2C1.i2c(
-        (cs43l22_scl, cs43l22_sda),
+        (audio_scl, audio_sda),
         100.kHz(),
         &clocks,
     );
 
-    let mut codec = CS43L22::new(i2c1, 0x4A, cs43l22::Config::new().volume(100).verify_write(true)).unwrap();
 
-    codec.play().unwrap();
+    // TODO TU JE BUG
+    let mut codec = CS43L22::new(i2c1, 0x94, cs43l22::Config::new().volume(100).verify_write(true)).unwrap();
+    //
+    // codec.play().unwrap();
 
     let i2s = i2s::I2s::new(dp.SPI3, (
         cs43l22_ws,
