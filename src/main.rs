@@ -38,6 +38,34 @@ use crate::cs43l22::CS43L22;
 
 const SAMPLE_RATE: u32 = 96_000;
 
+const SHORT_PLAY: [i16; 14] = [
+    0, 3211, 6392, 9511, 12539, 15446, 18204, 20787, 23169, 25329, 27244, 28897, 30272, 31356,
+];
+
+const SINE_750: [i16; 64] = [
+    0, 3211, 6392, 9511, 12539, 15446, 18204, 20787, 23169, 25329, 27244, 28897, 30272, 31356,
+    32137, 32609, 32767, 32609, 32137, 31356, 30272, 28897, 27244, 25329, 23169, 20787, 18204,
+    15446, 12539, 9511, 6392, 3211, 0, -3211, -6392, -9511, -12539, -15446, -18204, -20787, -23169,
+    -25329, -27244, -28897, -30272, -31356, -32137, -32609, -32767, -32609, -32137, -31356, -30272,
+    -28897, -27244, -25329, -23169, -20787, -18204, -15446, -12539, -9511, -6392, -3211,
+];
+
+/// A sine wave spanning 128 samples
+///
+/// With a sample rate of 48 kHz, this produces a 375 Hz tone.
+const SINE_375: [i16; 128] = [
+    0, 1607, 3211, 4807, 6392, 7961, 9511, 11038, 12539, 14009, 15446, 16845, 18204, 19519, 20787,
+    22004, 23169, 24278, 25329, 26318, 27244, 28105, 28897, 29621, 30272, 30851, 31356, 31785,
+    32137, 32412, 32609, 32727, 32767, 32727, 32609, 32412, 32137, 31785, 31356, 30851, 30272,
+    29621, 28897, 28105, 27244, 26318, 25329, 24278, 23169, 22004, 20787, 19519, 18204, 16845,
+    15446, 14009, 12539, 11038, 9511, 7961, 6392, 4807, 3211, 1607, 0, -1607, -3211, -4807, -6392,
+    -7961, -9511, -11038, -12539, -14009, -15446, -16845, -18204, -19519, -20787, -22004, -23169,
+    -24278, -25329, -26318, -27244, -28105, -28897, -29621, -30272, -30851, -31356, -31785, -32137,
+    -32412, -32609, -32727, -32767, -32727, -32609, -32412, -32137, -31785, -31356, -30851, -30272,
+    -29621, -28897, -28105, -27244, -26318, -25329, -24278, -23169, -22004, -20787, -19519, -18204,
+    -16845, -15446, -14009, -12539, -11038, -9511, -7961, -6392, -4807, -3211, -1607,
+];
+
 // stm32f411e-disco
 
 struct Angle {
@@ -56,7 +84,7 @@ impl Angle {
             z: 0.0,
         }
     }
-    pub fn update(&mut self, x: f32, y: f32, z: f32) {
+    pub fn  update(&mut self, x: f32, y: f32, z: f32) {
         if abs(x) > ANGLE_THRESHOLD {
             if self.x + x > 360.0 {
                 self.x = self.x + x - 360.0;
@@ -109,11 +137,13 @@ enum BoardMode {
     SwitchingOffLeds,
     AllLeds,
     Gyro,
+    PlayMusic,
 }
 
 impl BoardMode {
     pub fn next_state(&self) -> BoardMode {
         return match self {
+            BoardMode::PlayMusic => BoardMode::PlayMusic,
             BoardMode::LightingLeds => BoardMode::AllLeds,
             BoardMode::SwitchingOffLeds => BoardMode::Gyro,
             BoardMode::AllLeds => BoardMode::AllLeds,
@@ -144,7 +174,8 @@ impl Board {
             BoardMode::LightingLeds => self.mode = BoardMode::SwitchingOffLeds,
             BoardMode::SwitchingOffLeds => self.mode = BoardMode::LightingLeds,
             BoardMode::AllLeds => self.mode = BoardMode::SwitchingOffLeds,
-            BoardMode::Gyro => self.mode = BoardMode::LightingLeds,
+            BoardMode::Gyro => self.mode = BoardMode::PlayMusic,
+            BoardMode::PlayMusic => self.mode = BoardMode::LightingLeds,
         }
     }
 
@@ -245,28 +276,6 @@ fn main() -> ! {
     );
 
 
-    // TODO TU JE BUG
-    let mut codec = CS43L22::new(i2c1, 0x94, cs43l22::Config::new().volume(100).verify_write(true)).unwrap();
-    //
-    // codec.play().unwrap();
-
-    let i2s = i2s::I2s::new(dp.SPI3, (
-        cs43l22_ws,
-        cs43l22_ck,
-        cs43l22_mck,
-        cs43l22_sd,
-    ), &clocks);
-    let i2s_config = I2sTransferConfig::new_master()
-        .transmit()
-        .master_clock(true)
-        .standard(Philips)
-        .data_format(Data32Channel32)
-        .request_frequency(SAMPLE_RATE);
-
-
-    let mut i2s_transfer = I2sTransfer::new(i2s, i2s_config);
-
-
     cs_pin.set_high();
 
     let spi = Spi::new(
@@ -294,6 +303,32 @@ fn main() -> ! {
         .unwrap();
 
     let (mut tx, mut rx) = serial.split();
+
+    // TODO TU JE BUG
+    let mut codec = CS43L22::new(i2c1, 0x4A, cs43l22::Config::new().volume(50).verify_write(true));
+
+    if let Err(e) = codec {
+        panic!("Error initializing CS43L22: {:?}", e);
+    }
+    let mut codec = codec.unwrap();
+    //
+    codec.play().unwrap();
+
+    let i2s = i2s::I2s::new(dp.SPI3, (
+        cs43l22_ws,
+        cs43l22_ck,
+        cs43l22_mck,
+        cs43l22_sd,
+    ), &clocks);
+    let i2s_config = I2sTransferConfig::new_master()
+        .transmit()
+        .master_clock(true)
+        .standard(Philips)
+        .data_format(Data32Channel32)
+        .request_frequency(SAMPLE_RATE);
+
+
+    let mut i2s_transfer = I2sTransfer::new(i2s, i2s_config);
 
 
     let stim = &mut cp.ITM.stim[0];
@@ -329,7 +364,70 @@ fn main() -> ! {
 
     writeln!(tx, "Setup successful").unwrap();
 
+    let sine_375_1sec = SINE_375
+        .iter()
+        .map(|&x| {
+            let x = (x as i32) << 16;
+            (x, x)
+        })
+        .cycle()
+        .take(SAMPLE_RATE as usize);
+
+    let mut sine_750_1sec = SINE_750
+        .iter()
+        .map(|&x| {
+            let x = (x as i32) << 16;
+            (x, x)
+        })
+        .cycle()
+        .take(SAMPLE_RATE as usize);
+
+
+    let short_play = SINE_375
+        .iter()
+        .map(|&x| {
+            let x = (x as i32) << 16;
+            (x, x)
+        })
+        .cycle()
+        .take(SAMPLE_RATE as usize / 2);
+
+    // Play 1 second of the first tone and 1 second of the second tone 5 times (10 seconds)
+    // for _ in 0..5 {
+    //     for sample in sine_375_1sec.clone() {
+    //         block!(i2s_transfer.write(sample)).ok();
+    //     }
+    //
+    //     i2s_transfer.write_iter(sine_750_1sec.clone());
+    // }
+
     let mut cycle = 0;
+
+    let mut sound = 50;
+
+    let mut update_angle = |angle: &mut Angle| {
+        let status = gyroscope.status();
+        if let Err(_) = status {
+            return;
+        }
+        let status = status.unwrap();
+        // print new
+        if !status.x_new && !status.y_new && !status.z_new {
+            return;
+        }
+
+        let status_x_float = if status.x_new { 1.0 } else { 0.0 };
+        let status_y_float = if status.y_new { 1.0 } else { 0.0 };
+        let status_z_float = if status.z_new { 1.0 } else { 0.0 };
+
+        let measurement = gyroscope.all().unwrap();
+        let gyro_scale = gyroscope.scale().unwrap();
+        let x = gyro_scale.degrees(measurement.gyro.x) * status_x_float;
+        let y = gyro_scale.degrees(measurement.gyro.y) * status_y_float;
+        let z = gyro_scale.degrees(measurement.gyro.z) * status_z_float;
+        angle.update(x, y, z);
+    };
+
 
     loop {
         cortex_m::interrupt::free(|cs| {
@@ -342,6 +440,28 @@ fn main() -> ! {
 
         match &board.mode {
             BoardMode::AllLeds => {}
+            BoardMode::PlayMusic => {
+                let mut angle = &mut board.angle;
+                if cycle % 500 == 0 {
+                    let sound = {
+                        if angle.x() > 100 as f32 {
+                            100
+                        } else if angle.x() < -100 as f32 {
+                            0
+                        } else {
+                            ((angle.x() + 100.0) * 0.5) as u8
+                        }
+                    };
+                    writeln!(tx, "Sound: {}", sound).unwrap();
+                    codec.set_volume(sound).unwrap();
+                }
+
+                let played = sine_750_1sec.next().unwrap();
+
+                block!(i2s_transfer.write(played.clone())).ok();
+
+                update_angle(&mut angle);
+            }
             BoardMode::Gyro => {
                 let mut angle = &mut board.angle;
                 if cycle % 10 == 0 {
@@ -365,27 +485,7 @@ fn main() -> ! {
                     writeln!(tx, "x: {}, y: {}, z: {}", angle.x(), angle.y(), angle.z()).unwrap();
                 }
 
-                let status = gyroscope.status();
-                if let Err(_) = status {
-                    writeln!(tx, "Error reading status").unwrap();
-                    continue;
-                }
-                let status = status.unwrap();
-                // print new
-                if !status.x_new && !status.y_new && !status.z_new {
-                    continue;
-                }
-
-                let status_x_float = if status.x_new { 1.0 } else { 0.0 };
-                let status_y_float = if status.y_new { 1.0 } else { 0.0 };
-                let status_z_float = if status.z_new { 1.0 } else { 0.0 };
-
-                let measurement = gyroscope.all().unwrap();
-                let gyro_scale = gyroscope.scale().unwrap();
-                let x = gyro_scale.degrees(measurement.gyro.x) * status_x_float;
-                let y = gyro_scale.degrees(measurement.gyro.y) * status_y_float;
-                let z = gyro_scale.degrees(measurement.gyro.z) * status_z_float;
-                angle.update(x, y, z);
+                update_angle(&mut angle);
             }
             BoardMode::LightingLeds => {
                 green_led.set_high();
